@@ -105,5 +105,8 @@ int main()
     pthread_join(inputThread, NULL);
     pthread_join(outputThread, NULL);
 
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
+
     return 0;
 }
