@@ -12,8 +12,8 @@ C/C++, Linux系统编程, 多进程多线程
 
 | 日期 | 主题 | 文件 |
 |------|------|------|
-| 2026-08-08 | 环形缓冲区 | [笔记链接](RingBuffer/Ringbuffer.md) |
-| 2026-08-09 | 读者写者问题的信号量实现-FIFO | [笔记链接](ReaderAndWriter/Semaphore_FIFO.md) |
+| 2026-08-08 | 环形缓冲区 | [笔记链接](RingBuffer/RingBuffer.md) |
+| 2026-08-09 | 读者写者问题的信号量实现-FIFO | [笔记链接](ReaderAndWriter/Semaphore.md) |
 
 
 ### 项目代码
