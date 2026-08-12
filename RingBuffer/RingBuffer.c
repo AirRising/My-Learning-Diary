@@ -1,104 +1,135 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <pthread.h>
 #include <stdbool.h>
 
 #define maxNum 1024
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; 
-pthread_cond_t empty = PTHREAD_COND_INITIALIZER; // 表示有空位
-pthread_cond_t full = PTHREAD_COND_INITIALIZER; // 表示有数据
+typedef struct {
+    char buffer[maxNum];
+    int readIdx; // 缓存读取索引
+    int writeIdx; // 缓存写入索引
+    pthread_mutex_t mutex;
+    pthread_cond_t empty; // 表示有空位
+    pthread_cond_t full; // 表示有数据
+} RingBuffer;
 
-int done = 0; // 标志位，表示输入线程是否完成
-
-char buffer[maxNum];
-int indexRead = 0; // 缓存读取索引
-int indexWrite = 0; // 缓存写入索引
-
-bool isEmpty()
-{
-    return indexRead == indexWrite;
+// 初始化环形缓冲区
+void rbInit(RingBuffer *rb) {
+    rb->readIdx = 0;
+    rb->writeIdx = 0;
+    pthread_mutex_init(&rb->mutex, NULL);
+    pthread_cond_init(&rb->empty, NULL);
+    pthread_cond_init(&rb->full, NULL);
 }
 
-int getSize()
-{
-    return (indexWrite - indexRead + maxNum) % maxNum;
+// 销毁环形缓冲区
+void rbDestroy(RingBuffer *rb) {
+    pthread_mutex_destroy(&rb->mutex);
+    pthread_cond_destroy(&rb->empty);
+    pthread_cond_destroy(&rb->full);
 }
 
-void clearBuffer()
+bool isEmpty(RingBuffer* rb)
 {
-    indexRead = 0;
-    indexWrite = 0;
+    return rb->readIdx == rb->writeIdx;
 }
 
-bool getInput(char c)
+int getSize(RingBuffer* rb)
 {
+    return (rb->writeIdx - rb->readIdx + maxNum) % maxNum;
+}
+
+void clearBuffer(RingBuffer* rb)
+{
+    rb->readIdx = 0;
+    rb->writeIdx = 0;
+}
+
+bool getInput(RingBuffer* rb, char c)
+{
+    pthread_mutex_lock(&rb->mutex);
     // 调用者持有互斥锁
     //int nextIndex = (indexWrite + 1) % maxNum; // 下一个写入的索引
-    while ((indexWrite + 1) % maxNum == indexRead)  // 缓冲区已满，停止写入
+    while ((rb->writeIdx + 1) % maxNum == rb->readIdx)  // 缓冲区已满，停止写入
     {
-        pthread_cond_wait(&empty, &mutex);
+        pthread_cond_wait(&rb->empty, &rb->mutex);
     }
-    buffer[indexWrite] = c;
-    indexWrite = (indexWrite + 1) % maxNum;
-    // 写入后唤醒消费者（因为缓冲区现在至少有一个字符）
-    pthread_cond_signal(&full);
+    rb->buffer[rb->writeIdx] = c;
+    rb->writeIdx = (rb->writeIdx + 1) % maxNum;
+    // 唤醒读取线程,缓冲区现在至少有一个数据
+    pthread_cond_signal(&rb->full);
+    pthread_mutex_unlock(&rb->mutex);
     return true;
 }
 
-bool getOutput(char* c)
+bool getOutput(RingBuffer* rb, char* c)
 {
+    pthread_mutex_lock(&rb->mutex);
     // 调用者持有互斥锁
-    while (indexRead == indexWrite)  // 缓冲区为空，等待生产者写入
+    while (rb->readIdx == rb->writeIdx)  // 缓冲区为空
     {
-        if (done)  // 输入线程已完成，且缓冲区为空
-        {
-            return false;
-        }
-        // 否则等待生产者放入数据
-        pthread_cond_wait(&full, &mutex);
+        // 等待生产者放入数据
+        pthread_cond_wait(&rb->full, &rb->mutex);
     }
-    *c = buffer[indexRead];
-    indexRead = (indexRead + 1) % maxNum;
-    // 读取后唤醒写入线程（因为缓冲区现在至少有一个空位）
-    pthread_cond_signal(&empty);
+    *c = rb->buffer[rb->readIdx];
+    rb->readIdx = (rb->readIdx + 1) % maxNum;
+    // 唤醒写入线程,缓冲区现在至少有一个空位
+    pthread_cond_signal(&rb->empty);
+    pthread_mutex_unlock(&rb->mutex);
     return true;
 }
+
+// 线程参数结构体，传递参数用
+typedef struct {
+    RingBuffer *rb;
+    const char *str;
+    int done;  // 输入完成标志
+} ThreadArgs;
 
 void* pthreadInput(void* arg)
 {
-    char* str = (char*)arg;
-    char* p = str;
-    while (*p != '\0')
-    {
-        pthread_mutex_lock(&mutex);
-        getInput(*p); // 内部会等待直到有空位
+    ThreadArgs *args = (ThreadArgs *)arg;
+    RingBuffer *rb = args->rb;
+    const char* p = args->str;
+
+    while (*p != '\0') {
+        getInput(rb, *p); // 内部会等待直到有空位
         p++;
-        pthread_mutex_unlock(&mutex);
     }
 
     // 生产完毕，通知消费者
-    pthread_mutex_lock(&mutex);
-    done = 1;
-    pthread_cond_broadcast(&full);  // 唤醒所有可能等待的消费者
-    pthread_mutex_unlock(&mutex);
+    pthread_mutex_lock(&rb->mutex);
+    args->done = 1;
+    pthread_cond_broadcast(&rb->full);  // 唤醒所有可能等待的消费者
+    pthread_mutex_unlock(&rb->mutex);
     return NULL;
 }
 
 void* pthreadOutput(void* arg)
 {
+    ThreadArgs *args = (ThreadArgs *)arg;
+    RingBuffer *rb = args->rb;
     char c;
-    while (1) {
-        pthread_mutex_lock(&mutex);
-        bool hasData = getOutput(&c);  // 内部会等待直到有数据或结束
-        if (!hasData) {
-            pthread_mutex_unlock(&mutex);
-            break;
+    while (1)
+    {
+        pthread_mutex_lock(&rb->mutex);
+        while (isEmpty(rb))
+        {
+            if (args->done) {
+                pthread_mutex_unlock(&rb->mutex);
+                return NULL; // 如果输入线程已经完成且缓冲区为空，则解锁退出
+            }
+            pthread_cond_wait(&rb->full, &rb->mutex); // 等待生产者放入数据
         }
-        pthread_mutex_unlock(&mutex);
+        c = rb->buffer[rb->readIdx];
+        rb->readIdx = (rb->readIdx + 1) % maxNum;
+
+        pthread_cond_signal(&rb->empty); // 唤醒可能等待的生产者
+        pthread_mutex_unlock(&rb->mutex);
+
         printf("%c", c);
-        fflush(stdout);  // 实时输出
+        fflush(stdout); // 确保立即输出
     }
-    printf("\n");
+    
     return NULL;
 }
